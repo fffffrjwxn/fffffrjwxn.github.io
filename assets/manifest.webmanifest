@@ -1,0 +1,14 @@
+{
+  "name": "Студия красоты «Flamingo»",
+  "short_name": "Flamingo",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FBF4EE",
+  "theme_color": "#FBF4EE",
+  "lang": "ru",
+  "icons": [
+    { "src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/assets/icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
