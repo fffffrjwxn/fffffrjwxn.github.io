@@ -502,6 +502,116 @@
     updateCta();
   }
 
+  /* ---------- запись прямо на сайте: имя и телефон ---------- */
+  function savedClient() {
+    try { return JSON.parse(localStorage.getItem('flamingo_client') || '{}'); } catch (e) { return {}; }
+  }
+
+  function stepForm() {
+    var s = booking.service;
+    var w = (booking.days || []).filter(function (d) { return d.date === booking.date; })[0];
+    var when = (w ? w.date_text : booking.date) + ', ' + booking.time;
+    sheetSetup('Ваши данные', true, stepTime);
+    var body = $('#sheetBody');
+    var change = el('button', { type: 'button', class: 'sheet__change', text: 'Изменить' });
+    change.addEventListener('click', stepTime);
+    body.appendChild(el('div', { class: 'sheet__svc' }, [
+      el('div', {}, [
+        s.category ? el('small', { class: 'sheet__cat', text: s.category }) : null,
+        el('b', { text: s.name }),
+        el('small', { text: '📅 ' + when + ' · ' + s.price_text })
+      ]),
+      change
+    ]));
+    var saved = savedClient();
+    var name = el('input', { type: 'text', class: 'field__input', name: 'name', autocomplete: 'name', maxlength: '60',
+      placeholder: 'Как к вам обращаться', required: '' });
+    var phone = el('input', { type: 'tel', class: 'field__input', name: 'phone', autocomplete: 'tel', inputmode: 'tel',
+      maxlength: '20', placeholder: '+7 900 123-45-67', required: '' });
+    name.value = saved.name || '';
+    phone.value = saved.phone || '';
+    var trap = el('input', { type: 'text', name: 'website', tabindex: '-1', autocomplete: 'off', class: 'field__trap',
+      'aria-hidden': 'true' });
+    var consent = el('input', { type: 'checkbox', id: 'consent' });
+    var error = el('p', { class: 'sheet__note sheet__note--warn', hidden: '' });
+    body.appendChild(el('div', { class: 'sheet__form' }, [
+      el('label', { class: 'field' }, [el('span', { text: 'Имя' }), name]),
+      el('label', { class: 'field' }, [el('span', { text: 'Телефон' }), phone]),
+      trap,
+      el('label', { class: 'consent', for: 'consent' }, [consent, el('span', { text: 'Согласен(на) на обработку персональных данных для записи' })]),
+      error
+    ]));
+
+    var foot = $('#sheetFoot');
+    var submit = el('button', { type: 'button', class: 'btn btn--primary btn--block btn--lg', text: 'Записаться · ' + booking.time });
+    var tg = el('a', { class: 'sheet__alt', text: 'или записаться через Telegram →' });
+    setExternal(tg, state.bot ? botLink('b' + s.id + '_' + booking.date.replace(/-/g, '') + '_' + booking.time.replace(':', '')) : state.master);
+    foot.appendChild(submit);
+    foot.appendChild(tg);
+
+    function showError(text, field) {
+      error.textContent = text;
+      error.hidden = false;
+      if (field === 'name') name.focus();
+      if (field === 'phone') phone.focus();
+    }
+    submit.addEventListener('click', function () {
+      error.hidden = true;
+      if (name.value.trim().length < 2) return showError('Напишите, пожалуйста, ваше имя.', 'name');
+      if (phone.value.replace(/\D/g, '').length < 10) return showError('Проверьте номер телефона — например, +7 900 123-45-67.', 'phone');
+      if (!consent.checked) return showError('Отметьте согласие на обработку персональных данных.');
+      submit.disabled = true;
+      submit.classList.add('is-disabled');
+      submit.textContent = 'Записываем…';
+      try { localStorage.setItem('flamingo_client', JSON.stringify({ name: name.value.trim(), phone: phone.value.trim() })); } catch (e) {}
+      api.book({ service_id: s.id, date: booking.date, time: booking.time, name: name.value, phone: phone.value,
+        consent: true, website: trap.value })
+        .then(function (res) {
+          if (res.ok) return stepDone(res);
+          submit.disabled = false;
+          submit.classList.remove('is-disabled');
+          submit.textContent = 'Записаться · ' + booking.time;
+          showError(res.reason, res.field);
+          if (res.taken) {
+            var again = el('button', { type: 'button', class: 'btn btn--ghost btn--block', text: 'Выбрать другое время' });
+            again.addEventListener('click', function () { booking.time = null; stepTime(); });
+            error.after(again);
+          }
+        })
+        .catch(function () {
+          submit.disabled = false;
+          submit.classList.remove('is-disabled');
+          submit.textContent = 'Попробовать ещё раз';
+          showError('Не удалось связаться со студией. Попробуйте ещё раз через минуту или запишитесь через Telegram — ссылка ниже.');
+        });
+    });
+  }
+
+  function stepDone(res) {
+    var b = res.booking;
+    sheetSetup('Вы записаны!', false);
+    var body = $('#sheetBody');
+    body.appendChild(el('div', { class: 'done' }, [
+      el('div', { class: 'done__icon', text: '🎉' }),
+      el('p', { class: 'done__title', text: b.date_text + ' в ' + b.time }),
+      el('p', { text: b.service + ' · ' + b.duration + ' · ' + b.price }),
+      el('p', { class: 'muted', text: '📍 ' + res.address }),
+      res.payment ? el('p', { class: 'muted', text: '💵 ' + res.payment }) : null,
+      el('p', { class: 'muted', text: 'Если планы изменятся — позвоните: ' + res.phone })
+    ]));
+    var foot = $('#sheetFoot');
+    if (res.telegram) {
+      var tg = el('a', { class: 'btn btn--primary btn--block', text: '🔔 Получить напоминание в Telegram' });
+      setExternal(tg, res.telegram);
+      foot.appendChild(tg);
+      foot.appendChild(el('p', { class: 'sheet__hint', text: 'Бот пришлёт напоминание накануне, там же можно перенести запись.' }));
+    }
+    var ok = el('button', { type: 'button', class: 'btn btn--ghost btn--block', text: 'Готово' });
+    ok.addEventListener('click', closeBooking);
+    foot.appendChild(ok);
+    load();  // обновляем свободные окна на странице
+  }
+
   /* ---------- галерея ---------- */
   function renderGallery(images) {
     var section = $('#gallery');
@@ -618,7 +728,7 @@
       openBooking({});
     });
     $$('#sheet [data-close]').forEach(function (b) { b.addEventListener('click', closeBooking); });
-    $('#sheetBack').addEventListener('click', stepService);
+    $('#sheetBack').addEventListener('click', function () { (booking.backFn || stepService)(); });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('#sheet').hidden) closeBooking(); });
 
     var lb = $('#lightbox');
