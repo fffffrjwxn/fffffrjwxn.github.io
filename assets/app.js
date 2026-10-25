@@ -11,10 +11,42 @@
      там лежат файлы data/*.json, которые программа студии обновляет сама, а своё время клиента
      проверяется по готовым диапазонам (бот всё равно перепроверит при записи). */
   var STATIC = /\.github\.io$/.test(location.hostname) || /[?&]static=1/.test(location.search);
-  function getJSON(url) {
-    return fetch(url + (url.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now(), { cache: 'no-store' })
-      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
+  function getJSON(url, opts, ms) {
+    // Таймаут, чтобы сайт не «зависал», если компьютер студии временно недоступен
+    var ctrl = 'AbortController' in window ? new AbortController() : null;
+    var timer = ctrl && setTimeout(function () { ctrl.abort(); }, ms || 12000);
+    var o = opts || { cache: 'no-store' };
+    if (ctrl) o.signal = ctrl.signal;
+    var full = (o.method === 'POST') ? url : url + (url.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now();
+    return fetch(full, o)
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .finally(function () { if (timer) clearTimeout(timer); });
   }
+
+  /* Живой сервер студии. На GitHub Pages его адрес лежит в data/api.json (программа студии
+     обновляет его сама); на компьютере студии сервер — тот же адрес, что и у страницы. */
+  var liveBase = STATIC ? undefined : '';
+  function apiBase(force) {
+    if (!STATIC) return Promise.resolve('');
+    if (liveBase && !force) return Promise.resolve(liveBase);
+    return getJSON('/data/api.json', null, 8000)
+      .then(function (d) { liveBase = d.api_url || null; return liveBase; })
+      .catch(function () { liveBase = null; return null; });
+  }
+  function live(path, opts, retry) {
+    return apiBase().then(function (base) {
+      if (base === null) throw new Error('no live api');
+      return getJSON(base + path, opts, 12000).catch(function (e) {
+        if (!STATIC || retry === false) throw e;
+        // адрес сервера мог смениться — берём свежий и пробуем ещё раз
+        return apiBase(true).then(function (nb) {
+          if (!nb) throw e;
+          return getJSON(nb + path, opts, 12000);
+        });
+      });
+    });
+  }
+
   var staticSlots = null;
   var api = {
     config: function () {
@@ -22,17 +54,29 @@
       return getJSON(STATIC ? '/data/config.json' : '/api/config');
     },
     slots: function (serviceId) {
-      if (!STATIC) return getJSON('/api/slots?service=' + encodeURIComponent(serviceId));
-      staticSlots = staticSlots || getJSON('/data/slots.json');
-      return staticSlots.then(function (all) {
-        if (!all[serviceId]) throw new Error('no service');
-        return all[serviceId];
+      var path = '/api/slots?service=' + encodeURIComponent(serviceId);
+      if (!STATIC) return getJSON(path);
+      // сначала живое расписание, если сервер студии недоступен — снимок с GitHub
+      return live(path, null, false).catch(function () {
+        staticSlots = staticSlots || getJSON('/data/slots.json');
+        return staticSlots.then(function (all) {
+          if (!all[serviceId]) throw new Error('no service');
+          return all[serviceId];
+        });
       });
     },
+    book: function (payload) {
+      // text/plain — чтобы браузер не делал лишний предварительный запрос к серверу
+      return live('/api/book', { method: 'POST', cache: 'no-store', body: JSON.stringify(payload),
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
+    },
     check: function (serviceId, date, time, slots) {
-      if (!STATIC) {
-        return getJSON('/api/check?service=' + encodeURIComponent(serviceId) + '&date=' + date + '&time=' + encodeURIComponent(time));
-      }
+      var path = '/api/check?service=' + encodeURIComponent(serviceId) + '&date=' + date + '&time=' + encodeURIComponent(time);
+      if (!STATIC) return getJSON(path);
+      var self = this;
+      return live(path, null, false).catch(function () { return self.checkLocal(serviceId, date, time, slots); });
+    },
+    checkLocal: function (serviceId, date, time, slots) {
       var day = (slots.days || []).filter(function (d) { return d.date === date; })[0];
       var parts = time.split(':');
       var m = +parts[0] * 60 + +parts[1];
@@ -232,7 +276,8 @@
     setTimeout(function () { sheet.hidden = true; }, 250);
   }
 
-  function sheetSetup(title, showBack) {
+  function sheetSetup(title, showBack, backFn) {
+    booking.backFn = backFn || stepService;
     $('#sheetTitle').textContent = title;
     $('#sheetBack').hidden = !showBack;
     $('#sheetBody').textContent = '';
@@ -302,33 +347,27 @@
     body.appendChild(area);
 
     var foot = $('#sheetFoot');
-    var cta = el('a', { class: 'btn btn--primary btn--block btn--lg is-disabled', text: 'Выберите время', 'aria-disabled': 'true' });
-    var hint = el('p', { class: 'sheet__hint', text: 'Дальше откроется Telegram — останется указать имя и телефон.' });
+    var cta = el('button', { type: 'button', class: 'btn btn--primary btn--block btn--lg is-disabled', text: 'Выберите время' });
+    var tg = el('a', { class: 'sheet__alt', text: 'или записаться через Telegram →' });
     foot.appendChild(cta);
-    foot.appendChild(hint);
+    foot.appendChild(tg);
 
     function updateCta() {
-      if (!booking.date || !booking.time) {
-        cta.classList.add('is-disabled');
-        cta.setAttribute('aria-disabled', 'true');
-        cta.removeAttribute('href');
-        cta.textContent = 'Выберите время';
-        return;
-      }
-      cta.classList.remove('is-disabled');
-      cta.removeAttribute('aria-disabled');
-      cta.textContent = 'Записаться в Telegram · ' + booking.time;
-      if (state.bot) {
-        setExternal(cta, botLink('b' + s.id + '_' + booking.date.replace(/-/g, '') + '_' + booking.time.replace(':', '')));
-      } else {
-        setExternal(cta, state.master);
-        hint.textContent = 'Онлайн-бот временно недоступен — напишите мастеру в Telegram, указав услугу и время.';
+      var ready = booking.date && booking.time;
+      cta.classList.toggle('is-disabled', !ready);
+      cta.disabled = !ready;
+      cta.textContent = ready ? 'Записаться · ' + booking.time : 'Выберите время';
+      tg.hidden = !ready;
+      if (ready) {
+        setExternal(tg, state.bot
+          ? botLink('b' + s.id + '_' + booking.date.replace(/-/g, '') + '_' + booking.time.replace(':', ''))
+          : state.master);
       }
     }
-    cta.addEventListener('click', function (e) {
-      if (cta.classList.contains('is-disabled')) { e.preventDefault(); return; }
-      setTimeout(closeBooking, 400);
+    cta.addEventListener('click', function () {
+      if (booking.date && booking.time) stepForm();
     });
+    tg.addEventListener('click', function () { setTimeout(closeBooking, 400); });
 
     var req = ++booking.req;
     api.slots(s.id)
